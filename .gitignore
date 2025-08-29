@@ -1,3 +1,5 @@
 src/*
 LLMs-from-scratch
-/out*
+out/*
+gpt2
+*.pyc

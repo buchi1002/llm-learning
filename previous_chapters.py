@@ -1,5 +1,32 @@
 import torch
 import torch.nn as nn
+import tiktoken
+def generate_text_simple(model, idx,
+                         max_new_tokens, context_size):
+    for _ in range(max_new_tokens):
+        idx_cond = idx[:, -context_size:] # サポートされているコンテキストサイズを超える場合は現在のコンテキストを切り詰める。最後のトークンが使われる。
+        with torch.no_grad():
+            logits = model(idx_cond)
+    
+        logits = logits[:, -1, :] # 最後のタイムステップにのみ着目する。(batch, n_token, vocab_size) -> (batch, vcab_size)
+
+        probas = torch.softmax(logits, dim=-1) # (batch, vocab_size) 今のことろ、logits のときと大小の順序が変わらないので以下の argmax に影響しない冗長な実装
+        
+        idx_next = torch.argmax(probas, dim=-1, keepdim=True) # 最も確率の高いトークンを返す。(batch, 1)
+        
+        idx = torch.cat((idx, idx_next), dim=-1) # 実行中のシーケンスに追加。
+    
+    return idx
+
+def text_to_token_ids(text, tokenizer):
+    encoded = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
+    encoded_tensor = torch.tensor(encoded).unsqueeze(0) # バッチ次元を追加
+    
+    return encoded_tensor
+
+def token_ids_to_text(token_ids, tokenizer):
+    flat = token_ids.squeeze(0)
+    return tokenizer.decode(flat.tolist())
 
 class LayerNorm(nn.Module):
     def __init__(self, emb_dim, eps=1e-5):
@@ -145,3 +172,91 @@ class GPTModel(nn.Module):
         x = self.final_norm(x)
         logits = self.out_head(x)
         return logits # 次に来るトークンの、正規化されていない確率で返す
+    
+
+def assign(left, right):
+    if left.shape != right.shape:
+        raise ValueError(
+            f"Shape mismatch. Left: {left.shape}, "
+            f"!= {right.shape}"
+        )
+    else:
+        return torch.nn.Parameter(torch.tensor(right))
+
+import numpy as np
+
+def load_weights_into_gpt(gpt, params):
+    gpt.pos_emb.weight = assign(gpt.pos_emb.weight, params["wpe"])
+    gpt.tok_emb.weight = assign(gpt.tok_emb.weight, params["wte"])
+    
+    for b in range(len(params["blocks"])):
+        # Attention の Q, K, W の重み
+        q_w, k_w, v_w = np.split(
+            (params["blocks"][b]["attn"]["c_attn"])["w"], 3, axis=1)
+        gpt.trf_blocks[b].att.W_query.weight = assign(
+            gpt.trf_blocks[b].att.W_query.weight, q_w.T)
+        gpt.trf_blocks[b].att.W_key.weight = assign(
+            gpt.trf_blocks[b].att.W_key.weight, k_w.T
+        )
+        gpt.trf_blocks[b].att.W_value.weight = assign(
+            gpt.trf_blocks[b].att.W_value.weight, v_w.T
+        )
+
+        # Attention の Q, K, W のバイアス
+        q_b, k_b, v_b = np.split(
+            (params["blocks"][b]["attn"]["c_attn"])["b"], 3, axis=-1)
+        gpt.trf_blocks[b].att.W_query.bias = assign(
+            gpt.trf_blocks[b].att.W_query.bias, q_b)
+        gpt.trf_blocks[b].att.W_key.bias = assign(
+            gpt.trf_blocks[b].att.W_key.bias, k_b)
+        gpt.trf_blocks[b].att.W_value.bias = assign(
+            gpt.trf_blocks[b].att.W_value.bias, v_b
+        )
+        
+        # Attention のヘッド結合時の線形写像
+        gpt.trf_blocks[b].att.out_proj.weight = assign(
+            gpt.trf_blocks[b].att.out_proj.weight,
+            params["blocks"][b]["attn"]["c_proj"]["w"].T)
+        # Attention のヘッド結合時のバイアス
+        gpt.trf_blocks[b].att.out_proj.bias = assign(
+            gpt.trf_blocks[b].att.out_proj.bias,
+            params["blocks"][b]["attn"]["c_proj"]["b"])
+        
+        # FeedForward の最初の線形写像
+        gpt.trf_blocks[b].ff.layers[0].weight = assign(
+            gpt.trf_blocks[b].ff.layers[0].weight,
+            params["blocks"][b]["mlp"]["c_fc"]["w"].T)
+        # FeedForward の最初のバイアス
+        gpt.trf_blocks[b].ff.layers[0].bias = assign(
+            gpt.trf_blocks[b].ff.layers[0].bias,
+            params["blocks"][b]["mlp"]["c_fc"]["b"])
+
+        # FeedForward の最後の線形写像
+        gpt.trf_blocks[b].ff.layers[2].weight = assign(
+            gpt.trf_blocks[b].ff.layers[2].weight,
+            params["blocks"][b]["mlp"]["c_proj"]["w"].T)
+        # FeedForward の最後のバイアス
+        gpt.trf_blocks[b].ff.layers[2].bias = assign(
+            gpt.trf_blocks[b].ff.layers[2].bias,
+            params["blocks"][b]["mlp"]["c_proj"]["b"])
+        
+        # transformer 内 LayerNorm 1 のパラメータを設定
+        gpt.trf_blocks[b].norm1.scale = assign(
+            gpt.trf_blocks[b].norm1.scale,
+            params["blocks"][b]["ln_1"]["g"])
+        gpt.trf_blocks[b].norm1.shift = assign(
+            gpt.trf_blocks[b].norm1.shift,
+            params["blocks"][b]["ln_1"]["b"])
+         
+        # transformer 内 LayerNorm 2 のパラメータを設定
+        gpt.trf_blocks[b].norm2.scale = assign(
+            gpt.trf_blocks[b].norm2.scale,
+            params["blocks"][b]["ln_2"]["g"])
+        gpt.trf_blocks[b].norm2.shift = assign(
+            gpt.trf_blocks[b].norm2.shift,
+            params["blocks"][b]["ln_2"]["b"])
+
+    # 最後の LayerNorm のパラメータを設定
+    gpt.final_norm.scale = assign(gpt.final_norm.scale, params["g"])
+    gpt.final_norm.shift = assign(gpt.final_norm.scale, params["b"])
+    gpt.out_head.weight = assign(gpt.out_head.weight, params["wte"])

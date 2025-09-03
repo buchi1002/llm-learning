@@ -300,7 +300,7 @@ def generate(model, idx, max_new_tokens, context_size, temperature=0.0,
         if idx_next == eos_id:
             break
         
-        idx = torch.cat((idx, idx_next), dim=-1) # idx_next を idx に追加
+        idx = torch.cat((idx, idx_next), dim=1) # idx_next を idx に追加
     return idx
 
 def load_weights_into_gpt(gpt, params):
@@ -378,3 +378,24 @@ def load_weights_into_gpt(gpt, params):
     gpt.final_norm.scale = assign(gpt.final_norm.scale, params["g"])
     gpt.final_norm.shift = assign(gpt.final_norm.scale, params["b"])
     gpt.out_head.weight = assign(gpt.out_head.weight, params["wte"])
+
+
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+
+def plot_losses(epochs_seen, tokens_seen, train_losses, val_losses):
+    fig, ax1 = plt.subplots(figsize=(5, 3))
+    ax1.plot(epochs_seen, train_losses, label="Training loss")
+    ax1.plot(
+        epochs_seen, val_losses, linestyle="--", label="Validation loss"
+    )
+    ax1.set_xlabel("Epochs")
+    ax1.set_ylabel("Loss")
+    ax1.legend(loc="upper right")
+    ax1.xaxis.set_major_locator(MaxNLocator(integer=True))
+    
+    ax2 = ax1.twiny()
+    ax2.plot(tokens_seen, train_losses, alpha=0)
+    ax2.set_xlabel("Tokens seen")
+    fig.tight_layout()
+    plt.show()
